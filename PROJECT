@@ -10,4 +10,13 @@ plugins:
   autoupdate.kubebuilder.io/v1-alpha: {}
 projectName: apps-operator
 repo: github.com/otterscale/apps-operator
+resources:
+- controller: true
+  domain: otterscale.io
+  external: true
+  group: apps
+  kind: SimpleApp
+  module: github.com/otterscale/api
+  path: github.com/otterscale/api/apps/v1alpha1
+  version: v1alpha1
 version: "3"
