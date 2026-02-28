@@ -36,7 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -67,9 +66,11 @@ var _ = Describe("SimpleApp Controller", func() {
 		return &runtime.RawExtension{Raw: raw}
 	}
 
+	one := int32(1)
+
 	defaultDeploymentSpec := func() appsv1.DeploymentSpec {
 		return appsv1.DeploymentSpec{
-			Replicas: ptr.To[int32](1),
+			Replicas: &one,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"app": "test"},
 			},
