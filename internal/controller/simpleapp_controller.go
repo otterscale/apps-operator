@@ -219,7 +219,7 @@ func (r *SimpleAppReconciler) observeDeploymentStatus(ctx context.Context, name,
 			if c.Status == corev1.ConditionTrue {
 				status = metav1.ConditionTrue
 			}
-			return status, "Deployment" + string(c.Reason), c.Message
+			return status, "Deployment" + c.Reason, c.Message
 		}
 	}
 
@@ -242,7 +242,7 @@ func (r *SimpleAppReconciler) observeDeploymentCondition(ctx context.Context, na
 			case corev1.ConditionFalse:
 				status = metav1.ConditionFalse
 			}
-			return status, "Deployment" + string(c.Reason), c.Message
+			return status, "Deployment" + c.Reason, c.Message
 		}
 	}
 

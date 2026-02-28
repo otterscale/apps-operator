@@ -290,7 +290,7 @@ var _ = Describe("SimpleApp Controller", func() {
 				&sa.InvalidSpecError{Field: "deployment", Message: "cannot unmarshal"})
 
 			Expect(err).NotTo(HaveOccurred()) // permanent error: no requeue
-			Expect(result.Requeue).To(BeFalse())
+			Expect(result.RequeueAfter).To(BeZero())
 
 			By("Verifying the status condition")
 			fetchResource(app, resourceName, namespace.Name)
