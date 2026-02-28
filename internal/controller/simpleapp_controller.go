@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -102,6 +103,7 @@ func (r *SimpleAppReconciler) reconcileResources(ctx context.Context, app *appsv
 
 // handleReconcileError categorizes errors and updates status accordingly.
 // Permanent errors (e.g. invalid spec) do NOT requeue to avoid infinite loops.
+// Conflict errors are silently requeued; they are transient and expected during concurrent updates.
 // Transient errors are returned to controller-runtime for exponential backoff retry.
 func (r *SimpleAppReconciler) handleReconcileError(ctx context.Context, app *appsv1alpha1.SimpleApp, err error) (ctrl.Result, error) {
 	var ise *sa.InvalidSpecError
@@ -109,6 +111,11 @@ func (r *SimpleAppReconciler) handleReconcileError(ctx context.Context, app *app
 		r.setReadyConditionFalse(ctx, app, "InvalidSpec", err.Error())
 		r.Recorder.Eventf(app, nil, corev1.EventTypeWarning, "InvalidSpec", "Reconcile", err.Error())
 		return ctrl.Result{}, nil
+	}
+
+	if apierrors.IsConflict(err) {
+		log.FromContext(ctx).V(1).Info("Conflict detected, requeuing", "error", err)
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	r.setReadyConditionFalse(ctx, app, "ReconcileError", err.Error())

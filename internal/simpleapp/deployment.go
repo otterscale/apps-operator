@@ -46,7 +46,7 @@ func ReconcileDeployment(ctx context.Context, c client.Client, scheme *runtime.S
 		},
 	}
 
-	op, err := ctrlutil.CreateOrUpdate(ctx, c, deploy, func() error {
+	op, err := ctrlutil.CreateOrPatch(ctx, c, deploy, func() error {
 		deploy.Spec = deploySpec
 
 		if deploy.Labels == nil {
