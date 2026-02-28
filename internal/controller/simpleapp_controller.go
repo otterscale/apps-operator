@@ -56,7 +56,6 @@ type SimpleAppReconciler struct {
 
 // +kubebuilder:rbac:groups=apps.otterscale.io,resources=simpleapps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.otterscale.io,resources=simpleapps/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=apps.otterscale.io,resources=simpleapps/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
