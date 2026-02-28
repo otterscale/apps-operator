@@ -44,12 +44,6 @@ rules:
 - apiGroups:
   - apps.otterscale.io
   resources:
-  - simpleapps/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - apps.otterscale.io
-  resources:
   - simpleapps/status
   verbs:
   - get
