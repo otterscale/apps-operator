@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package simpleapp
+package application
 
 import (
 	"context"
-	"encoding/json"
 	"maps"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,12 +27,12 @@ import (
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/otterscale/api/apps/v1alpha1"
+	workloadv1alpha1 "github.com/otterscale/api/workload/v1alpha1"
 )
 
 // ReconcileService ensures the Service matches the desired state or is deleted
 // when the spec is removed.
-func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Scheme, app *appsv1alpha1.SimpleApp, version string) error {
+func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Scheme, app *workloadv1alpha1.Application, version string) error {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      app.Name,
@@ -45,15 +44,10 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 		return client.IgnoreNotFound(c.Delete(ctx, svc))
 	}
 
-	var svcSpec corev1.ServiceSpec
-	if err := json.Unmarshal(app.Spec.Service.Raw, &svcSpec); err != nil {
-		return &InvalidSpecError{Field: "service", Message: err.Error()}
-	}
-
 	op, err := ctrlutil.CreateOrUpdate(ctx, c, svc, func() error {
 		// Preserve ClusterIP on update — Kubernetes treats it as immutable once assigned.
 		clusterIP := svc.Spec.ClusterIP
-		svc.Spec = svcSpec
+		svc.Spec = *app.Spec.Service
 		if clusterIP != "" {
 			svc.Spec.ClusterIP = clusterIP
 		}
@@ -61,7 +55,7 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 		if svc.Labels == nil {
 			svc.Labels = map[string]string{}
 		}
-		maps.Copy(svc.Labels, LabelsForSimpleApp(app.Name, version))
+		maps.Copy(svc.Labels, LabelsForApplication(app.Name, version))
 
 		return ctrlutil.SetControllerReference(app, svc, scheme)
 	})

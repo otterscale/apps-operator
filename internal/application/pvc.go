@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package simpleapp
+package application
 
 import (
 	"context"
-	"encoding/json"
 	"maps"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +27,7 @@ import (
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/otterscale/api/apps/v1alpha1"
+	workloadv1alpha1 "github.com/otterscale/api/workload/v1alpha1"
 )
 
 // ReconcilePVC ensures the PersistentVolumeClaim matches the desired state or
@@ -38,7 +37,7 @@ import (
 // field is spec.resources.requests.storage, which supports volume expansion when
 // the StorageClass has allowVolumeExpansion: true. On update, we synchronize the
 // storage request along with labels and owner references.
-func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, app *appsv1alpha1.SimpleApp, version string) error {
+func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, app *workloadv1alpha1.Application, version string) error {
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      app.Name,
@@ -50,18 +49,13 @@ func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, 
 		return client.IgnoreNotFound(c.Delete(ctx, pvc))
 	}
 
-	var pvcSpec corev1.PersistentVolumeClaimSpec
-	if err := json.Unmarshal(app.Spec.PersistentVolumeClaim.Raw, &pvcSpec); err != nil {
-		return &InvalidSpecError{Field: "persistentVolumeClaim", Message: err.Error()}
-	}
-
 	op, err := ctrlutil.CreateOrUpdate(ctx, c, pvc, func() error {
 		if pvc.CreationTimestamp.IsZero() {
-			pvc.Spec = pvcSpec
+			pvc.Spec = *app.Spec.PersistentVolumeClaim
 		} else {
 			// Volume expansion: update storage request if the desired size is larger.
 			// Kubernetes only allows increasing the size; the API server enforces this.
-			if desired, ok := pvcSpec.Resources.Requests[corev1.ResourceStorage]; ok {
+			if desired, ok := app.Spec.PersistentVolumeClaim.Resources.Requests[corev1.ResourceStorage]; ok {
 				if pvc.Spec.Resources.Requests == nil {
 					pvc.Spec.Resources.Requests = corev1.ResourceList{}
 				}
@@ -72,7 +66,7 @@ func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, 
 		if pvc.Labels == nil {
 			pvc.Labels = map[string]string{}
 		}
-		maps.Copy(pvc.Labels, LabelsForSimpleApp(app.Name, version))
+		maps.Copy(pvc.Labels, LabelsForApplication(app.Name, version))
 
 		return ctrlutil.SetControllerReference(app, pvc, scheme)
 	})

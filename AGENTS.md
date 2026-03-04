@@ -1,4 +1,4 @@
-# apps-operator - AI Agent Guide
+# workload-operator - AI Agent Guide
 
 ## Project Structure
 

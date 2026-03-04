@@ -20,7 +20,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/otterscale/apps-operator/internal/labels"
+	"github.com/otterscale/workload-operator/internal/labels"
 )
 
 var _ = Describe("Standard", func() {
@@ -63,8 +63,8 @@ var _ = Describe("Standard", func() {
 					Expect(got).NotTo(HaveKey(labels.Version))
 				}
 			},
-			Entry("typical release", "simple-app", "controller", "v0.1.0"),
-			Entry("empty version omits label", "simple-app", "controller", ""),
+			Entry("typical release", "application", "controller", "v0.1.0"),
+			Entry("empty version omits label", "application", "controller", ""),
 			Entry("all empty strings", "", "", ""),
 		)
 	})
@@ -86,8 +86,8 @@ var _ = Describe("Standard", func() {
 			Expect(labels.System).To(Equal("otterscale-system"))
 		})
 
-		It("Operator constant equals apps-operator", func() {
-			Expect(labels.Operator).To(Equal("apps-operator"))
+		It("Operator constant equals workload-operator", func() {
+			Expect(labels.Operator).To(Equal("workload-operator"))
 		})
 	})
 })

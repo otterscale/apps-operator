@@ -30,9 +30,16 @@ rules:
   - update
   - watch
 - apiGroups:
-  - apps.otterscale.io
+  - events.k8s.io
   resources:
-  - simpleapps
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - workload.otterscale.io
+  resources:
+  - applications
   verbs:
   - create
   - delete
@@ -42,17 +49,10 @@ rules:
   - update
   - watch
 - apiGroups:
-  - apps.otterscale.io
+  - workload.otterscale.io
   resources:
-  - simpleapps/status
+  - applications/status
   verbs:
   - get
   - patch
   - update
-- apiGroups:
-  - events.k8s.io
-  resources:
-  - events
-  verbs:
-  - create
-  - patch

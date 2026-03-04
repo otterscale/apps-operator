@@ -14,16 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package simpleapp
+package application
 
 import (
-	"fmt"
-
-	"github.com/otterscale/apps-operator/internal/labels"
+	"github.com/otterscale/workload-operator/internal/labels"
 )
 
 const (
-	// ConditionTypeReady indicates whether all SimpleApp resources have been
+	// ConditionTypeReady indicates whether all Application resources have been
 	// successfully reconciled and the Deployment is available.
 	ConditionTypeReady = "Ready"
 
@@ -35,18 +33,7 @@ const (
 	ConditionTypeDegraded = "Degraded"
 )
 
-// InvalidSpecError is a permanent error indicating that a field in SimpleAppSpec
-// contains invalid JSON that cannot be deserialized into the expected Kubernetes type.
-type InvalidSpecError struct {
-	Field   string
-	Message string
-}
-
-func (e *InvalidSpecError) Error() string {
-	return fmt.Sprintf("invalid %s spec: %s", e.Field, e.Message)
-}
-
-// LabelsForSimpleApp returns a standard set of labels for resources managed by this operator.
-func LabelsForSimpleApp(name, version string) map[string]string {
-	return labels.Standard(name, "simpleapp", version)
+// LabelsForApplication returns a standard set of labels for resources managed by this operator.
+func LabelsForApplication(name, version string) map[string]string {
+	return labels.Standard(name, "application", version)
 }

@@ -14,11 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package simpleapp
+package application
 
 import (
 	"context"
-	"encoding/json"
 	"maps"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -28,17 +27,12 @@ import (
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	appsv1alpha1 "github.com/otterscale/api/apps/v1alpha1"
+	workloadv1alpha1 "github.com/otterscale/api/workload/v1alpha1"
 )
 
 // ReconcileDeployment ensures the Deployment exists and matches the desired state
-// declared in SimpleApp.Spec.Deployment.
-func ReconcileDeployment(ctx context.Context, c client.Client, scheme *runtime.Scheme, app *appsv1alpha1.SimpleApp, version string) error {
-	var deploySpec appsv1.DeploymentSpec
-	if err := json.Unmarshal(app.Spec.Deployment.Raw, &deploySpec); err != nil {
-		return &InvalidSpecError{Field: "deployment", Message: err.Error()}
-	}
-
+// declared in Application.Spec.Deployment.
+func ReconcileDeployment(ctx context.Context, c client.Client, scheme *runtime.Scheme, app *workloadv1alpha1.Application, version string) error {
 	deploy := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      app.Name,
@@ -47,12 +41,12 @@ func ReconcileDeployment(ctx context.Context, c client.Client, scheme *runtime.S
 	}
 
 	op, err := ctrlutil.CreateOrPatch(ctx, c, deploy, func() error {
-		deploy.Spec = deploySpec
+		deploy.Spec = app.Spec.Deployment
 
 		if deploy.Labels == nil {
 			deploy.Labels = map[string]string{}
 		}
-		maps.Copy(deploy.Labels, LabelsForSimpleApp(app.Name, version))
+		maps.Copy(deploy.Labels, LabelsForApplication(app.Name, version))
 
 		return ctrlutil.SetControllerReference(app, deploy, scheme)
 	})

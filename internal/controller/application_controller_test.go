@@ -18,8 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
-	stderrors "errors"
 	"fmt"
 	"time"
 
@@ -28,10 +26,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -39,12 +35,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	appsv1alpha1 "github.com/otterscale/api/apps/v1alpha1"
-	"github.com/otterscale/apps-operator/internal/labels"
-	sa "github.com/otterscale/apps-operator/internal/simpleapp"
+	workloadv1alpha1 "github.com/otterscale/api/workload/v1alpha1"
+	"github.com/otterscale/workload-operator/internal/labels"
 )
 
-var _ = Describe("SimpleApp Controller", func() {
+var _ = Describe("Application Controller", func() {
 	const (
 		timeout  = time.Second * 10
 		interval = time.Millisecond * 250
@@ -52,19 +47,13 @@ var _ = Describe("SimpleApp Controller", func() {
 
 	var (
 		ctx          context.Context
-		reconciler   *SimpleAppReconciler
-		app          *appsv1alpha1.SimpleApp
+		reconciler   *ApplicationReconciler
+		application  *workloadv1alpha1.Application
 		resourceName string
 		namespace    *corev1.Namespace
 	)
 
 	// --- Helpers ---
-
-	toRawExtension := func(obj any) *runtime.RawExtension {
-		raw, err := json.Marshal(obj)
-		Expect(err).NotTo(HaveOccurred())
-		return &runtime.RawExtension{Raw: raw}
-	}
 
 	one := int32(1)
 
@@ -88,11 +77,11 @@ var _ = Describe("SimpleApp Controller", func() {
 		}
 	}
 
-	makeSimpleApp := func(name, ns string, mods ...func(*appsv1alpha1.SimpleApp)) *appsv1alpha1.SimpleApp {
-		a := &appsv1alpha1.SimpleApp{
+	makeApplication := func(name, ns string, mods ...func(*workloadv1alpha1.Application)) *workloadv1alpha1.Application {
+		a := &workloadv1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
-			Spec: appsv1alpha1.SimpleAppSpec{
-				Deployment: *toRawExtension(defaultDeploymentSpec()),
+			Spec: workloadv1alpha1.ApplicationSpec{
+				Deployment: defaultDeploymentSpec(),
 			},
 		}
 		for _, mod := range mods {
@@ -118,32 +107,32 @@ var _ = Describe("SimpleApp Controller", func() {
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		resourceName = "sa-" + string(uuid.NewUUID())[:8]
+		resourceName = "app-" + string(uuid.NewUUID())[:8]
 
 		namespace = &corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{Name: "ns-" + string(uuid.NewUUID())[:8]},
 		}
 		Expect(k8sClient.Create(ctx, namespace)).To(Succeed())
 
-		reconciler = &SimpleAppReconciler{
+		reconciler = &ApplicationReconciler{
 			Client:   k8sClient,
 			Scheme:   k8sClient.Scheme(),
 			Version:  "test",
 			Recorder: events.NewFakeRecorder(100),
 		}
-		app = makeSimpleApp(resourceName, namespace.Name)
+		application = makeApplication(resourceName, namespace.Name)
 	})
 
 	JustBeforeEach(func() {
-		Expect(k8sClient.Create(ctx, app)).To(Succeed())
+		Expect(k8sClient.Create(ctx, application)).To(Succeed())
 	})
 
 	AfterEach(func() {
 		key := types.NamespacedName{Name: resourceName, Namespace: namespace.Name}
-		if err := k8sClient.Get(ctx, key, app); err == nil {
-			Expect(k8sClient.Delete(ctx, app)).To(Succeed())
+		if err := k8sClient.Get(ctx, key, application); err == nil {
+			Expect(k8sClient.Delete(ctx, application)).To(Succeed())
 			Eventually(func() bool {
-				return errors.IsNotFound(k8sClient.Get(ctx, key, app))
+				return errors.IsNotFound(k8sClient.Get(ctx, key, application))
 			}, timeout, interval).Should(BeTrue())
 		}
 	})
@@ -157,8 +146,8 @@ var _ = Describe("SimpleApp Controller", func() {
 			By("Verifying the Deployment is created")
 			var deploy appsv1.Deployment
 			fetchResource(&deploy, resourceName, namespace.Name)
-			Expect(deploy.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "apps-operator"))
-			Expect(deploy.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "simpleapp"))
+			Expect(deploy.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "workload-operator"))
+			Expect(deploy.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "application"))
 			Expect(*deploy.Spec.Replicas).To(Equal(int32(1)))
 
 			By("Verifying OwnerReference is set")
@@ -166,26 +155,26 @@ var _ = Describe("SimpleApp Controller", func() {
 			Expect(deploy.OwnerReferences[0].Name).To(Equal(resourceName))
 
 			By("Verifying status updates")
-			fetchResource(app, resourceName, namespace.Name)
-			Expect(app.Status.ObservedGeneration).To(Equal(app.Generation))
-			Expect(app.Status.DeploymentRef).NotTo(BeNil())
-			Expect(app.Status.DeploymentRef.Name).To(Equal(resourceName))
-			Expect(app.Status.DeploymentRef.Namespace).To(Equal(namespace.Name))
-			Expect(app.Status.ServiceRef).To(BeNil())
-			Expect(app.Status.PersistentVolumeClaimRef).To(BeNil())
+			fetchResource(application, resourceName, namespace.Name)
+			Expect(application.Status.ObservedGeneration).To(Equal(application.Generation))
+			Expect(application.Status.DeploymentRef).NotTo(BeNil())
+			Expect(application.Status.DeploymentRef.Name).To(Equal(resourceName))
+			Expect(application.Status.DeploymentRef.Namespace).To(Equal(namespace.Name))
+			Expect(application.Status.ServiceRef).To(BeNil())
+			Expect(application.Status.PersistentVolumeClaimRef).To(BeNil())
 		})
 	})
 
 	Context("Optional Service Lifecycle", func() {
 		BeforeEach(func() {
-			app = makeSimpleApp(resourceName, namespace.Name, func(a *appsv1alpha1.SimpleApp) {
-				a.Spec.Service = toRawExtension(corev1.ServiceSpec{
+			application = makeApplication(resourceName, namespace.Name, func(a *workloadv1alpha1.Application) {
+				a.Spec.Service = &corev1.ServiceSpec{
 					Ports: []corev1.ServicePort{{
 						Port:       80,
 						TargetPort: intstr.FromInt32(8080),
 					}},
 					Selector: map[string]string{"app": "test"},
-				})
+				}
 			})
 		})
 
@@ -197,17 +186,17 @@ var _ = Describe("SimpleApp Controller", func() {
 			fetchResource(&svc, resourceName, namespace.Name)
 			Expect(svc.Spec.Ports).To(HaveLen(1))
 			Expect(svc.Spec.Ports[0].Port).To(Equal(int32(80)))
-			Expect(svc.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "apps-operator"))
+			Expect(svc.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "workload-operator"))
 
 			By("Verifying status has ServiceRef")
-			fetchResource(app, resourceName, namespace.Name)
-			Expect(app.Status.ServiceRef).NotTo(BeNil())
-			Expect(app.Status.ServiceRef.Name).To(Equal(resourceName))
+			fetchResource(application, resourceName, namespace.Name)
+			Expect(application.Status.ServiceRef).NotTo(BeNil())
+			Expect(application.Status.ServiceRef.Name).To(Equal(resourceName))
 
 			By("Removing Service from spec")
-			fetchResource(app, resourceName, namespace.Name)
-			app.Spec.Service = nil
-			Expect(k8sClient.Update(ctx, app)).To(Succeed())
+			fetchResource(application, resourceName, namespace.Name)
+			application.Spec.Service = nil
+			Expect(k8sClient.Update(ctx, application)).To(Succeed())
 
 			executeReconcile()
 
@@ -217,22 +206,22 @@ var _ = Describe("SimpleApp Controller", func() {
 			}, &svc))).To(BeTrue())
 
 			By("Verifying ServiceRef is cleared in status")
-			fetchResource(app, resourceName, namespace.Name)
-			Expect(app.Status.ServiceRef).To(BeNil())
+			fetchResource(application, resourceName, namespace.Name)
+			Expect(application.Status.ServiceRef).To(BeNil())
 		})
 	})
 
 	Context("Optional PVC Lifecycle", func() {
 		BeforeEach(func() {
-			app = makeSimpleApp(resourceName, namespace.Name, func(a *appsv1alpha1.SimpleApp) {
-				a.Spec.PersistentVolumeClaim = toRawExtension(corev1.PersistentVolumeClaimSpec{
+			application = makeApplication(resourceName, namespace.Name, func(a *workloadv1alpha1.Application) {
+				a.Spec.PersistentVolumeClaim = &corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 					Resources: corev1.VolumeResourceRequirements{
 						Requests: corev1.ResourceList{
 							corev1.ResourceStorage: resource.MustParse("1Gi"),
 						},
 					},
-				})
+				}
 			})
 		})
 
@@ -243,17 +232,17 @@ var _ = Describe("SimpleApp Controller", func() {
 			var pvc corev1.PersistentVolumeClaim
 			fetchResource(&pvc, resourceName, namespace.Name)
 			Expect(pvc.Spec.AccessModes).To(ContainElement(corev1.ReadWriteOnce))
-			Expect(pvc.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "apps-operator"))
+			Expect(pvc.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "workload-operator"))
 
 			By("Verifying status has PVCRef")
-			fetchResource(app, resourceName, namespace.Name)
-			Expect(app.Status.PersistentVolumeClaimRef).NotTo(BeNil())
-			Expect(app.Status.PersistentVolumeClaimRef.Name).To(Equal(resourceName))
+			fetchResource(application, resourceName, namespace.Name)
+			Expect(application.Status.PersistentVolumeClaimRef).NotTo(BeNil())
+			Expect(application.Status.PersistentVolumeClaimRef.Name).To(Equal(resourceName))
 
 			By("Removing PVC from spec")
-			fetchResource(app, resourceName, namespace.Name)
-			app.Spec.PersistentVolumeClaim = nil
-			Expect(k8sClient.Update(ctx, app)).To(Succeed())
+			fetchResource(application, resourceName, namespace.Name)
+			application.Spec.PersistentVolumeClaim = nil
+			Expect(k8sClient.Update(ctx, application)).To(Succeed())
 
 			executeReconcile()
 
@@ -269,60 +258,33 @@ var _ = Describe("SimpleApp Controller", func() {
 			}, timeout, interval).Should(BeTrue())
 
 			By("Verifying PVCRef is cleared in status")
-			fetchResource(app, resourceName, namespace.Name)
-			Expect(app.Status.PersistentVolumeClaimRef).To(BeNil())
+			fetchResource(application, resourceName, namespace.Name)
+			Expect(application.Status.PersistentVolumeClaimRef).To(BeNil())
 		})
 	})
 
-	Context("Invalid Spec Handling", func() {
-		It("should report InvalidSpecError for malformed deployment spec", func() {
-			By("Verifying that InvalidSpecError is classified as permanent (no requeue)")
-			var ise *sa.InvalidSpecError
-			Expect(stderrors.As(&sa.InvalidSpecError{Field: "deployment", Message: "bad"}, &ise)).To(BeTrue())
-			Expect(ise.Error()).To(ContainSubstring("invalid deployment spec"))
-		})
-
-		It("should set Ready=False via handleReconcileError on InvalidSpecError", func() {
-			executeReconcile()
-
-			By("Simulating an InvalidSpecError through handleReconcileError")
-			fetchResource(app, resourceName, namespace.Name)
-			result, err := reconciler.handleReconcileError(ctx, app,
-				&sa.InvalidSpecError{Field: "deployment", Message: "cannot unmarshal"})
-
-			Expect(err).NotTo(HaveOccurred()) // permanent error: no requeue
-			Expect(result.RequeueAfter).To(BeZero())
-
-			By("Verifying the status condition")
-			fetchResource(app, resourceName, namespace.Name)
-			readyCond := meta.FindStatusCondition(app.Status.Conditions, "Ready")
-			Expect(readyCond).NotTo(BeNil())
-			Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-			Expect(readyCond.Reason).To(Equal("InvalidSpec"))
-			Expect(readyCond.Message).To(ContainSubstring("cannot unmarshal"))
-		})
-
+	Context("Error Handling", func() {
 		It("should requeue on transient errors", func() {
 			executeReconcile()
 
 			By("Simulating a transient error through handleReconcileError")
-			fetchResource(app, resourceName, namespace.Name)
-			_, err := reconciler.handleReconcileError(ctx, app,
+			fetchResource(application, resourceName, namespace.Name)
+			_, err := reconciler.handleReconcileError(ctx, application,
 				fmt.Errorf("connection refused"))
 
-			Expect(err).To(HaveOccurred()) // transient error: requeue
+			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("connection refused"))
 		})
 	})
 
 	Context("Domain Helpers", func() {
 		It("should generate correct labels", func() {
-			appLabels := sa.LabelsForSimpleApp("my-app", "v1")
+			appLabels := labels.Standard("my-app", "application", "v1")
 			Expect(appLabels).To(HaveKeyWithValue(labels.Name, "my-app"))
 			Expect(appLabels).To(HaveKeyWithValue(labels.Version, "v1"))
-			Expect(appLabels).To(HaveKeyWithValue(labels.Component, "simpleapp"))
+			Expect(appLabels).To(HaveKeyWithValue(labels.Component, "application"))
 			Expect(appLabels).To(HaveKeyWithValue(labels.PartOf, "otterscale-system"))
-			Expect(appLabels).To(HaveKeyWithValue(labels.ManagedBy, "apps-operator"))
+			Expect(appLabels).To(HaveKeyWithValue(labels.ManagedBy, "workload-operator"))
 		})
 	})
 })
