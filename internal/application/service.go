@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -40,16 +41,33 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 		},
 	}
 
-	if app.Spec.Service == nil {
+	if app.Spec.DeploymentConfig == nil || app.Spec.DeploymentConfig.Service == nil {
 		return client.IgnoreNotFound(c.Delete(ctx, svc))
 	}
 
 	op, err := ctrlutil.CreateOrUpdate(ctx, c, svc, func() error {
 		// Preserve ClusterIP on update — Kubernetes treats it as immutable once assigned.
 		clusterIP := svc.Spec.ClusterIP
-		svc.Spec = *app.Spec.Service
+		nodePorts := make(map[int32]int32, len(svc.Spec.Ports))
+		for _, p := range svc.Spec.Ports {
+			if p.NodePort != 0 {
+				nodePorts[p.Port] = p.NodePort
+			}
+		}
+
+		svc.Spec = *app.Spec.DeploymentConfig.Service
+
 		if clusterIP != "" {
 			svc.Spec.ClusterIP = clusterIP
+		}
+		// Restore Kubernetes-assigned NodePort values so we don't trigger
+		// unnecessary port re-assignment on every reconcile.
+		for i := range svc.Spec.Ports {
+			if svc.Spec.Ports[i].NodePort == 0 {
+				if np, ok := nodePorts[svc.Spec.Ports[i].Port]; ok {
+					svc.Spec.Ports[i].NodePort = np
+				}
+			}
 		}
 
 		if svc.Labels == nil {
@@ -65,5 +83,27 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 	if op != ctrlutil.OperationResultNone {
 		log.FromContext(ctx).Info("Service reconciled", "operation", op, "name", svc.Name)
 	}
+	return nil
+}
+
+// CleanupService deletes the Service owned by the Application if it exists.
+// This is called when transitioning from Deployment mode to CronJob mode.
+// It verifies the OwnerReference before deleting to avoid removing resources
+// not owned by this Application.
+func CleanupService(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
+	var svc corev1.Service
+	if err := c.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &svc); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	for _, ref := range svc.OwnerReferences {
+		if ref.UID == app.UID {
+			if err := c.Delete(ctx, &svc); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+			log.FromContext(ctx).Info("Service cleaned up", "name", svc.Name)
+			return nil
+		}
+	}
+	log.FromContext(ctx).Info("Service not owned by this Application, skipping cleanup", "name", svc.Name)
 	return nil
 }

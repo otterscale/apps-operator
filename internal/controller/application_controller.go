@@ -22,6 +22,7 @@ import (
 	"slices"
 
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -56,6 +57,8 @@ type ApplicationReconciler struct {
 // +kubebuilder:rbac:groups=workload.otterscale.io,resources=applications,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=workload.otterscale.io,resources=applications/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=cronjobs,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
@@ -89,14 +92,56 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 // reconcileResources orchestrates the domain-level resource sync in order.
+// It dispatches to the appropriate workload branch based on WorkloadType, and
+// cleans up stale resources left over from a previous mode.
 func (r *ApplicationReconciler) reconcileResources(ctx context.Context, application *workloadv1alpha1.Application) error {
-	if err := app.ReconcileDeployment(ctx, r.Client, r.Scheme, application, r.Version); err != nil {
-		return err
+	switch application.Spec.WorkloadType {
+	case workloadv1alpha1.WorkloadTypeCronJob:
+		// Transitioning from Deployment/Job: remove any pre-existing resources.
+		if err := app.CleanupDeployment(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupService(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupPVC(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupJob(ctx, r.Client, application); err != nil {
+			return err
+		}
+		return app.ReconcileCronJob(ctx, r.Client, r.Scheme, application, r.Version)
+	case workloadv1alpha1.WorkloadTypeJob:
+		// Transitioning from Deployment/CronJob: remove any pre-existing resources.
+		if err := app.CleanupDeployment(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupService(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupPVC(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupCronJob(ctx, r.Client, application); err != nil {
+			return err
+		}
+		return app.ReconcileJob(ctx, r.Client, r.Scheme, application, r.Version)
+	default: // WorkloadTypeDeployment
+		// Transitioning from CronJob/Job: remove any pre-existing workload.
+		if err := app.CleanupCronJob(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupJob(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.ReconcileDeployment(ctx, r.Client, r.Scheme, application, r.Version); err != nil {
+			return err
+		}
+		if err := app.ReconcileService(ctx, r.Client, r.Scheme, application, r.Version); err != nil {
+			return err
+		}
+		return app.ReconcilePVC(ctx, r.Client, r.Scheme, application, r.Version)
 	}
-	if err := app.ReconcileService(ctx, r.Client, r.Scheme, application, r.Version); err != nil {
-		return err
-	}
-	return app.ReconcilePVC(ctx, r.Client, r.Scheme, application, r.Version)
 }
 
 // handleReconcileError categorizes errors and updates status accordingly.
@@ -104,20 +149,18 @@ func (r *ApplicationReconciler) reconcileResources(ctx context.Context, applicat
 // Transient errors are returned to controller-runtime for exponential backoff retry.
 func (r *ApplicationReconciler) handleReconcileError(ctx context.Context, application *workloadv1alpha1.Application, err error) (ctrl.Result, error) {
 	if apierrors.IsConflict(err) {
-		log.FromContext(ctx).V(1).Info("Conflict detected, requeuing", "error", err)
+		log.FromContext(ctx).Info("Conflict detected, requeuing", "error", err)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	r.setReadyConditionFalse(ctx, application, "ReconcileError", err.Error())
+	_ = r.setReadyConditionFalse(ctx, application, "ReconcileError", err.Error())
 	r.Recorder.Eventf(application, nil, corev1.EventTypeWarning, "ReconcileError", "Reconcile", err.Error())
 	return ctrl.Result{}, err
 }
 
 // setReadyConditionFalse updates the Ready condition to False via status patch.
-// Errors are logged rather than propagated to avoid masking the original reconcile error.
-func (r *ApplicationReconciler) setReadyConditionFalse(ctx context.Context, application *workloadv1alpha1.Application, reason, message string) {
-	logger := log.FromContext(ctx)
-
+// Returns the patch error so callers can decide whether to retry.
+func (r *ApplicationReconciler) setReadyConditionFalse(ctx context.Context, application *workloadv1alpha1.Application, reason, message string) error {
 	patch := client.MergeFrom(application.DeepCopy())
 	meta.SetStatusCondition(&application.Status.Conditions, metav1.Condition{
 		Type:               app.ConditionTypeReady,
@@ -129,8 +172,10 @@ func (r *ApplicationReconciler) setReadyConditionFalse(ctx context.Context, appl
 	application.Status.ObservedGeneration = application.Generation
 
 	if err := r.Status().Patch(ctx, application, patch); err != nil {
-		logger.Error(err, "Failed to patch Ready=False status condition", "reason", reason)
+		log.FromContext(ctx).Error(err, "Failed to patch Ready=False status condition", "reason", reason)
+		return err
 	}
+	return nil
 }
 
 // updateStatus calculates the status based on the current observed state and patches the resource.
@@ -138,32 +183,69 @@ func (r *ApplicationReconciler) updateStatus(ctx context.Context, application *w
 	newStatus := application.Status.DeepCopy()
 	newStatus.ObservedGeneration = application.Generation
 
-	// Set resource references
-	newStatus.DeploymentRef = &workloadv1alpha1.ResourceReference{
-		Name:      application.Name,
-		Namespace: application.Namespace,
-	}
+	// Set workload-type-scoped resource references and derive Ready/Progressing conditions.
+	var readyStatus metav1.ConditionStatus
+	var readyReason, readyMessage string
+	// Initialize Progressing fields to safe defaults. They are only written to status
+	// for Deployment workloads (guarded below); explicit initialization avoids relying
+	// on an implicit zero-value guard against future refactoring.
+	progressingStatus := metav1.ConditionUnknown
+	progressingReason := "WorkloadTypePending"
+	progressingMessage := "Progressing condition is not applicable for this workload type"
 
-	if application.Spec.Service != nil {
-		newStatus.ServiceRef = &workloadv1alpha1.ResourceReference{
-			Name:      application.Name,
-			Namespace: application.Namespace,
-		}
-	} else {
+	switch application.Spec.WorkloadType {
+	case workloadv1alpha1.WorkloadTypeCronJob:
+		// Remove Progressing condition — it is not applicable for CronJob workloads and
+		// must be explicitly cleared when transitioning from Deployment mode.
+		meta.RemoveStatusCondition(&newStatus.Conditions, app.ConditionTypeProgressing)
+		newStatus.DeploymentRef = nil
 		newStatus.ServiceRef = nil
-	}
-
-	if application.Spec.PersistentVolumeClaim != nil {
-		newStatus.PersistentVolumeClaimRef = &workloadv1alpha1.ResourceReference{
+		newStatus.PersistentVolumeClaimRef = nil
+		newStatus.JobRef = nil
+		newStatus.CronJobRef = &workloadv1alpha1.ResourceReference{
 			Name:      application.Name,
 			Namespace: application.Namespace,
 		}
-	} else {
+		readyStatus, readyReason, readyMessage = r.observeCronJobStatus(ctx, application.Name, application.Namespace)
+	case workloadv1alpha1.WorkloadTypeJob:
+		// Remove Progressing condition — not applicable for one-off Job workloads.
+		meta.RemoveStatusCondition(&newStatus.Conditions, app.ConditionTypeProgressing)
+		newStatus.DeploymentRef = nil
+		newStatus.ServiceRef = nil
 		newStatus.PersistentVolumeClaimRef = nil
+		newStatus.CronJobRef = nil
+		newStatus.JobRef = &workloadv1alpha1.ResourceReference{
+			Name:      application.Name,
+			Namespace: application.Namespace,
+		}
+		readyStatus, readyReason, readyMessage = r.observeJobStatus(ctx, application.Name, application.Namespace)
+	default: // WorkloadTypeDeployment
+		newStatus.CronJobRef = nil
+		newStatus.JobRef = nil
+		newStatus.DeploymentRef = &workloadv1alpha1.ResourceReference{
+			Name:      application.Name,
+			Namespace: application.Namespace,
+		}
+		if application.Spec.DeploymentConfig != nil && application.Spec.DeploymentConfig.Service != nil {
+			newStatus.ServiceRef = &workloadv1alpha1.ResourceReference{
+				Name:      application.Name,
+				Namespace: application.Namespace,
+			}
+		} else {
+			newStatus.ServiceRef = nil
+		}
+		if application.Spec.DeploymentConfig != nil && application.Spec.DeploymentConfig.PersistentVolumeClaim != nil {
+			newStatus.PersistentVolumeClaimRef = &workloadv1alpha1.ResourceReference{
+				Name:      application.Name,
+				Namespace: application.Namespace,
+			}
+		} else {
+			newStatus.PersistentVolumeClaimRef = nil
+		}
+		readyStatus, readyReason, readyMessage, progressingStatus, progressingReason, progressingMessage = r.observeDeploymentStatuses(ctx, application.Name, application.Namespace)
 	}
 
-	// Observe the Deployment status to derive the Application Ready condition
-	readyStatus, readyReason, readyMessage := r.observeDeploymentStatus(ctx, application.Name, application.Namespace)
+	// Observe the workload status to derive the Application Ready condition
 	meta.SetStatusCondition(&newStatus.Conditions, metav1.Condition{
 		Type:               app.ConditionTypeReady,
 		Status:             readyStatus,
@@ -172,15 +254,16 @@ func (r *ApplicationReconciler) updateStatus(ctx context.Context, application *w
 		ObservedGeneration: application.Generation,
 	})
 
-	// Mirror Deployment Progressing condition
-	progressingStatus, progressingReason, progressingMessage := r.observeDeploymentCondition(ctx, application.Name, application.Namespace, string(appsv1.DeploymentProgressing))
-	meta.SetStatusCondition(&newStatus.Conditions, metav1.Condition{
-		Type:               app.ConditionTypeProgressing,
-		Status:             progressingStatus,
-		Reason:             progressingReason,
-		Message:            progressingMessage,
-		ObservedGeneration: application.Generation,
-	})
+	// Mirror Deployment Progressing condition (only applicable for Deployment workloads)
+	if application.Spec.WorkloadType == workloadv1alpha1.WorkloadTypeDeployment {
+		meta.SetStatusCondition(&newStatus.Conditions, metav1.Condition{
+			Type:               app.ConditionTypeProgressing,
+			Status:             progressingStatus,
+			Reason:             progressingReason,
+			Message:            progressingMessage,
+			ObservedGeneration: application.Generation,
+		})
+	}
 
 	// Sort conditions by type for stable ordering
 	slices.SortFunc(newStatus.Conditions, func(a, b metav1.Condition) int {
@@ -202,48 +285,98 @@ func (r *ApplicationReconciler) updateStatus(ctx context.Context, application *w
 	return nil
 }
 
-// observeDeploymentStatus reads the Deployment's Available condition and maps it
-// to the Application Ready condition.
-func (r *ApplicationReconciler) observeDeploymentStatus(ctx context.Context, name, namespace string) (metav1.ConditionStatus, string, string) {
+// observeDeploymentStatuses fetches the Deployment once and derives both the Ready
+// and Progressing condition tuples, avoiding redundant API server calls.
+// Transient errors (non-NotFound) are surfaced as ConditionUnknown / "ObservationError"
+// rather than being silently misreported as "DeploymentNotFound".
+func (r *ApplicationReconciler) observeDeploymentStatuses(ctx context.Context, name, namespace string) (
+	readyStatus metav1.ConditionStatus, readyReason, readyMsg string,
+	progressingStatus metav1.ConditionStatus, progressingReason, progressingMsg string,
+) {
 	var deploy appsv1.Deployment
 	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &deploy); err != nil {
-		return metav1.ConditionFalse, "DeploymentNotFound", "waiting for Deployment to be created"
-	}
-
-	for _, c := range deploy.Status.Conditions {
-		if c.Type == appsv1.DeploymentAvailable {
-			status := metav1.ConditionFalse
-			if c.Status == corev1.ConditionTrue {
-				status = metav1.ConditionTrue
-			}
-			return status, "Deployment" + c.Reason, c.Message
+		if apierrors.IsNotFound(err) {
+			return metav1.ConditionFalse, "DeploymentNotFound", "waiting for Deployment to be created",
+				metav1.ConditionUnknown, "DeploymentNotFound", "waiting for Deployment to be created"
 		}
+		msg := err.Error()
+		return metav1.ConditionUnknown, "ObservationError", msg,
+			metav1.ConditionUnknown, "ObservationError", msg
 	}
 
-	return metav1.ConditionUnknown, "DeploymentPending", "Deployment has no Available condition yet"
-}
-
-// observeDeploymentCondition reads a specific condition from the Deployment.
-func (r *ApplicationReconciler) observeDeploymentCondition(ctx context.Context, name, namespace, condType string) (metav1.ConditionStatus, string, string) {
-	var deploy appsv1.Deployment
-	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &deploy); err != nil {
-		return metav1.ConditionUnknown, "DeploymentNotFound", "waiting for Deployment to be created"
-	}
+	readyStatus = metav1.ConditionUnknown
+	readyReason = "DeploymentPending"
+	readyMsg = "Deployment has no Available condition yet"
+	progressingStatus = metav1.ConditionUnknown
+	progressingReason = "DeploymentPending"
+	progressingMsg = "Deployment has no " + string(appsv1.DeploymentProgressing) + " condition yet"
 
 	for _, c := range deploy.Status.Conditions {
-		if string(c.Type) == condType {
-			status := metav1.ConditionUnknown
+		switch c.Type {
+		case appsv1.DeploymentAvailable:
+			if c.Status == corev1.ConditionTrue {
+				readyStatus = metav1.ConditionTrue
+			} else {
+				readyStatus = metav1.ConditionFalse
+			}
+			readyReason = "Deployment" + c.Reason
+			readyMsg = c.Message
+		case appsv1.DeploymentProgressing:
 			switch c.Status {
 			case corev1.ConditionTrue:
-				status = metav1.ConditionTrue
+				progressingStatus = metav1.ConditionTrue
 			case corev1.ConditionFalse:
-				status = metav1.ConditionFalse
+				progressingStatus = metav1.ConditionFalse
 			}
-			return status, "Deployment" + c.Reason, c.Message
+			progressingReason = "Deployment" + c.Reason
+			progressingMsg = c.Message
 		}
 	}
 
-	return metav1.ConditionUnknown, "DeploymentPending", "Deployment has no " + condType + " condition yet"
+	return
+}
+
+// observeCronJobStatus reads the CronJob and derives the Application Ready condition.
+// A CronJob is considered Ready once it has been scheduled at least once.
+// Transient errors (non-NotFound) are surfaced as ConditionUnknown / "ObservationError".
+func (r *ApplicationReconciler) observeCronJobStatus(ctx context.Context, name, namespace string) (metav1.ConditionStatus, string, string) {
+	var cj batchv1.CronJob
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &cj); err != nil {
+		if apierrors.IsNotFound(err) {
+			return metav1.ConditionFalse, "CronJobNotFound", "waiting for CronJob to be created"
+		}
+		return metav1.ConditionUnknown, "ObservationError", err.Error()
+	}
+	if cj.Spec.Suspend != nil && *cj.Spec.Suspend {
+		return metav1.ConditionFalse, "CronJobSuspended", "CronJob is suspended and will not be scheduled"
+	}
+	if cj.Status.LastScheduleTime != nil {
+		return metav1.ConditionTrue, "CronJobScheduled", "CronJob has been scheduled at least once"
+	}
+	return metav1.ConditionUnknown, "CronJobPending", "CronJob has not been scheduled yet"
+}
+
+// observeJobStatus reads the Job and derives the Application Ready condition.
+// A Job is considered Ready (Complete) when it has the Complete condition set to True.
+// A failed Job surfaces as Ready=False with reason JobFailed.
+// Transient errors (non-NotFound) are surfaced as ConditionUnknown / "ObservationError".
+func (r *ApplicationReconciler) observeJobStatus(ctx context.Context, name, namespace string) (metav1.ConditionStatus, string, string) {
+	var job batchv1.Job
+	if err := r.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &job); err != nil {
+		if apierrors.IsNotFound(err) {
+			return metav1.ConditionFalse, "JobNotFound", "waiting for Job to be created"
+		}
+		return metav1.ConditionUnknown, "ObservationError", err.Error()
+	}
+	for _, c := range job.Status.Conditions {
+		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {
+			return metav1.ConditionTrue, "JobComplete", "Job completed successfully"
+		}
+		if c.Type == batchv1.JobFailed && c.Status == corev1.ConditionTrue {
+			return metav1.ConditionFalse, "JobFailed", c.Message
+		}
+	}
+	return metav1.ConditionUnknown, "JobRunning", "Job is in progress"
 }
 
 // SetupWithManager registers the controller with the Manager and defines watches.
@@ -253,6 +386,8 @@ func (r *ApplicationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
 		).
 		Owns(&appsv1.Deployment{}).
+		Owns(&batchv1.CronJob{}).
+		Owns(&batchv1.Job{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.PersistentVolumeClaim{}).
 		Named("application").

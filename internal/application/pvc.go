@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -45,17 +46,17 @@ func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, 
 		},
 	}
 
-	if app.Spec.PersistentVolumeClaim == nil {
+	if app.Spec.DeploymentConfig == nil || app.Spec.DeploymentConfig.PersistentVolumeClaim == nil {
 		return client.IgnoreNotFound(c.Delete(ctx, pvc))
 	}
 
 	op, err := ctrlutil.CreateOrUpdate(ctx, c, pvc, func() error {
 		if pvc.CreationTimestamp.IsZero() {
-			pvc.Spec = *app.Spec.PersistentVolumeClaim
+			pvc.Spec = *app.Spec.DeploymentConfig.PersistentVolumeClaim
 		} else {
 			// Volume expansion: update storage request if the desired size is larger.
 			// Kubernetes only allows increasing the size; the API server enforces this.
-			if desired, ok := app.Spec.PersistentVolumeClaim.Resources.Requests[corev1.ResourceStorage]; ok {
+			if desired, ok := app.Spec.DeploymentConfig.PersistentVolumeClaim.Resources.Requests[corev1.ResourceStorage]; ok {
 				if pvc.Spec.Resources.Requests == nil {
 					pvc.Spec.Resources.Requests = corev1.ResourceList{}
 				}
@@ -76,5 +77,27 @@ func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, 
 	if op != ctrlutil.OperationResultNone {
 		log.FromContext(ctx).Info("PersistentVolumeClaim reconciled", "operation", op, "name", pvc.Name)
 	}
+	return nil
+}
+
+// CleanupPVC deletes the PersistentVolumeClaim owned by the Application if it exists.
+// This is called when transitioning from Deployment mode to CronJob mode.
+// It verifies the OwnerReference before deleting to avoid removing resources
+// not owned by this Application.
+func CleanupPVC(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
+	var pvc corev1.PersistentVolumeClaim
+	if err := c.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &pvc); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	for _, ref := range pvc.OwnerReferences {
+		if ref.UID == app.UID {
+			if err := c.Delete(ctx, &pvc); client.IgnoreNotFound(err) != nil {
+				return err
+			}
+			log.FromContext(ctx).Info("PersistentVolumeClaim cleaned up", "name", pvc.Name)
+			return nil
+		}
+	}
+	log.FromContext(ctx).Info("PersistentVolumeClaim not owned by this Application, skipping cleanup", "name", pvc.Name)
 	return nil
 }

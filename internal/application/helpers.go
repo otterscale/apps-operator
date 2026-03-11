@@ -27,10 +27,6 @@ const (
 
 	// ConditionTypeProgressing indicates the Deployment is rolling out new pods.
 	ConditionTypeProgressing = "Progressing"
-
-	// ConditionTypeDegraded indicates the Deployment has not reached its
-	// desired replica count or has failing pods.
-	ConditionTypeDegraded = "Degraded"
 )
 
 // LabelsForApplication returns a standard set of labels for resources managed by this operator.
