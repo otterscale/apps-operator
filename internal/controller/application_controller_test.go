@@ -247,6 +247,7 @@ var _ = Describe("Application Controller", func() {
 			By("Removing PVC from spec")
 			fetchResource(application, resourceName, namespace.Name)
 			application.Spec.DeploymentConfig.PersistentVolumeClaim = nil
+			application.Spec.DeploymentConfig.MountPath = ""
 			Expect(k8sClient.Update(ctx, application)).To(Succeed())
 
 			executeReconcile()

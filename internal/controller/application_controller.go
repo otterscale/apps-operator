@@ -300,8 +300,8 @@ func (r *ApplicationReconciler) observeDeploymentStatuses(ctx context.Context, n
 				metav1.ConditionUnknown, "DeploymentNotFound", "waiting for Deployment to be created"
 		}
 		msg := err.Error()
-		return metav1.ConditionUnknown, "ObservationError", msg,
-			metav1.ConditionUnknown, "ObservationError", msg
+		return metav1.ConditionUnknown, app.ReasonObservationError, msg,
+			metav1.ConditionUnknown, app.ReasonObservationError, msg
 	}
 
 	readyStatus = metav1.ConditionUnknown
@@ -333,7 +333,7 @@ func (r *ApplicationReconciler) observeDeploymentStatuses(ctx context.Context, n
 		}
 	}
 
-	return
+	return readyStatus, readyReason, readyMsg, progressingStatus, progressingReason, progressingMsg
 }
 
 // observeCronJobStatus reads the CronJob and derives the Application Ready condition.
@@ -345,7 +345,7 @@ func (r *ApplicationReconciler) observeCronJobStatus(ctx context.Context, name, 
 		if apierrors.IsNotFound(err) {
 			return metav1.ConditionFalse, "CronJobNotFound", "waiting for CronJob to be created"
 		}
-		return metav1.ConditionUnknown, "ObservationError", err.Error()
+		return metav1.ConditionUnknown, app.ReasonObservationError, err.Error()
 	}
 	if cj.Spec.Suspend != nil && *cj.Spec.Suspend {
 		return metav1.ConditionFalse, "CronJobSuspended", "CronJob is suspended and will not be scheduled"
@@ -366,7 +366,7 @@ func (r *ApplicationReconciler) observeJobStatus(ctx context.Context, name, name
 		if apierrors.IsNotFound(err) {
 			return metav1.ConditionFalse, "JobNotFound", "waiting for Job to be created"
 		}
-		return metav1.ConditionUnknown, "ObservationError", err.Error()
+		return metav1.ConditionUnknown, app.ReasonObservationError, err.Error()
 	}
 	for _, c := range job.Status.Conditions {
 		if c.Type == batchv1.JobComplete && c.Status == corev1.ConditionTrue {

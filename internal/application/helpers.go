@@ -27,6 +27,10 @@ const (
 
 	// ConditionTypeProgressing indicates the Deployment is rolling out new pods.
 	ConditionTypeProgressing = "Progressing"
+
+	// ReasonObservationError is used when a transient error prevents the controller
+	// from reading the workload's current state.
+	ReasonObservationError = "ObservationError"
 )
 
 // LabelsForApplication returns a standard set of labels for resources managed by this operator.
