@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -126,22 +125,6 @@ func injectPVC(spec *appsv1.DeploymentSpec, pvcName, mountPath string) {
 
 // CleanupDeployment deletes the Deployment owned by the Application if it exists.
 // This is called when transitioning from Deployment mode to CronJob mode.
-// It verifies the OwnerReference before deleting to avoid removing resources
-// not owned by this Application.
 func CleanupDeployment(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
-	var deploy appsv1.Deployment
-	if err := c.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &deploy); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	for _, ref := range deploy.OwnerReferences {
-		if ref.UID == app.UID {
-			if err := c.Delete(ctx, &deploy); client.IgnoreNotFound(err) != nil {
-				return err
-			}
-			log.FromContext(ctx).Info("Deployment cleaned up", "name", deploy.Name)
-			return nil
-		}
-	}
-	log.FromContext(ctx).Info("Deployment not owned by this Application, skipping cleanup", "name", deploy.Name)
-	return nil
+	return CleanupOwnedResource(ctx, c, app, &appsv1.Deployment{}, "Deployment")
 }

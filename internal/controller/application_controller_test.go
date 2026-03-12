@@ -367,14 +367,12 @@ var _ = Describe("Application Controller", func() {
 					CronJob:      nil, // intentionally nil
 				},
 			}
-			nsName := types.NamespacedName{Name: nilApp.Name, Namespace: nilApp.Namespace}
 			// Patch the live object's spec to have nil cronJob field so Reconcile
 			// fetches it from the API and hits the guard.
 			// Instead, call reconcileResources directly to test the guard path.
 			err := reconciler.reconcileResources(ctx, nilApp)
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("spec.cronJob is nil"))
-			_ = nsName
 		})
 	})
 

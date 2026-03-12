@@ -24,7 +24,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -68,22 +67,6 @@ func ReconcileCronJob(ctx context.Context, c client.Client, scheme *runtime.Sche
 
 // CleanupCronJob deletes the CronJob owned by the Application if it exists.
 // This is called when transitioning from CronJob mode back to Deployment mode.
-// It verifies the OwnerReference before deleting to avoid removing resources
-// not owned by this Application.
 func CleanupCronJob(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
-	var cj batchv1.CronJob
-	if err := c.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &cj); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	for _, ref := range cj.OwnerReferences {
-		if ref.UID == app.UID {
-			if err := c.Delete(ctx, &cj); client.IgnoreNotFound(err) != nil {
-				return err
-			}
-			log.FromContext(ctx).Info("CronJob cleaned up", "name", cj.Name)
-			return nil
-		}
-	}
-	log.FromContext(ctx).Info("CronJob not owned by this Application, skipping cleanup", "name", cj.Name)
-	return nil
+	return CleanupOwnedResource(ctx, c, app, &batchv1.CronJob{}, "CronJob")
 }

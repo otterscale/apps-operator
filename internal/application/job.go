@@ -24,7 +24,6 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -75,22 +74,6 @@ func ReconcileJob(ctx context.Context, c client.Client, scheme *runtime.Scheme, 
 
 // CleanupJob deletes the Job owned by the Application if it exists.
 // This is called when transitioning away from Job mode to another WorkloadType.
-// It verifies the OwnerReference before deleting to avoid removing resources
-// not owned by this Application.
 func CleanupJob(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
-	var job batchv1.Job
-	if err := c.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &job); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	for _, ref := range job.OwnerReferences {
-		if ref.UID == app.UID {
-			if err := c.Delete(ctx, &job); client.IgnoreNotFound(err) != nil {
-				return err
-			}
-			log.FromContext(ctx).Info("Job cleaned up", "name", job.Name)
-			return nil
-		}
-	}
-	log.FromContext(ctx).Info("Job not owned by this Application, skipping cleanup", "name", job.Name)
-	return nil
+	return CleanupOwnedResource(ctx, c, app, &batchv1.Job{}, "Job")
 }

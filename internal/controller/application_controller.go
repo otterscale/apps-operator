@@ -92,48 +92,39 @@ func (r *ApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 }
 
 // reconcileResources orchestrates the domain-level resource sync in order.
-// It dispatches to the appropriate workload branch based on WorkloadType, and
-// cleans up stale resources left over from a previous mode.
+// It first cleans up resources belonging to other workload types to handle
+// WorkloadType transitions, then reconciles the active type.
 func (r *ApplicationReconciler) reconcileResources(ctx context.Context, application *workloadv1alpha1.Application) error {
+	// Clean up resources from other workload types to handle transitions.
+	if application.Spec.WorkloadType != workloadv1alpha1.WorkloadTypeDeployment {
+		if err := app.CleanupDeployment(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupService(ctx, r.Client, application); err != nil {
+			return err
+		}
+		if err := app.CleanupPVC(ctx, r.Client, application); err != nil {
+			return err
+		}
+	}
+	if application.Spec.WorkloadType != workloadv1alpha1.WorkloadTypeCronJob {
+		if err := app.CleanupCronJob(ctx, r.Client, application); err != nil {
+			return err
+		}
+	}
+	if application.Spec.WorkloadType != workloadv1alpha1.WorkloadTypeJob {
+		if err := app.CleanupJob(ctx, r.Client, application); err != nil {
+			return err
+		}
+	}
+
+	// Reconcile resources for the current workload type.
 	switch application.Spec.WorkloadType {
 	case workloadv1alpha1.WorkloadTypeCronJob:
-		// Transitioning from Deployment/Job: remove any pre-existing resources.
-		if err := app.CleanupDeployment(ctx, r.Client, application); err != nil {
-			return err
-		}
-		if err := app.CleanupService(ctx, r.Client, application); err != nil {
-			return err
-		}
-		if err := app.CleanupPVC(ctx, r.Client, application); err != nil {
-			return err
-		}
-		if err := app.CleanupJob(ctx, r.Client, application); err != nil {
-			return err
-		}
 		return app.ReconcileCronJob(ctx, r.Client, r.Scheme, application, r.Version)
 	case workloadv1alpha1.WorkloadTypeJob:
-		// Transitioning from Deployment/CronJob: remove any pre-existing resources.
-		if err := app.CleanupDeployment(ctx, r.Client, application); err != nil {
-			return err
-		}
-		if err := app.CleanupService(ctx, r.Client, application); err != nil {
-			return err
-		}
-		if err := app.CleanupPVC(ctx, r.Client, application); err != nil {
-			return err
-		}
-		if err := app.CleanupCronJob(ctx, r.Client, application); err != nil {
-			return err
-		}
 		return app.ReconcileJob(ctx, r.Client, r.Scheme, application, r.Version)
 	default: // WorkloadTypeDeployment
-		// Transitioning from CronJob/Job: remove any pre-existing workload.
-		if err := app.CleanupCronJob(ctx, r.Client, application); err != nil {
-			return err
-		}
-		if err := app.CleanupJob(ctx, r.Client, application); err != nil {
-			return err
-		}
 		if err := app.ReconcileDeployment(ctx, r.Client, r.Scheme, application, r.Version); err != nil {
 			return err
 		}

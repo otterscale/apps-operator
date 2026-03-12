@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlutil "sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -55,7 +54,10 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 			}
 		}
 
-		svc.Spec = *app.Spec.DeploymentConfig.Service
+		// DeepCopy before assigning to avoid mutating the Application's in-memory
+		// ServiceSpec via shared slice/map backing arrays when restoring ClusterIP
+		// and NodePort values below.
+		svc.Spec = *app.Spec.DeploymentConfig.Service.DeepCopy()
 
 		if clusterIP != "" {
 			svc.Spec.ClusterIP = clusterIP
@@ -88,22 +90,6 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 
 // CleanupService deletes the Service owned by the Application if it exists.
 // This is called when transitioning from Deployment mode to CronJob mode.
-// It verifies the OwnerReference before deleting to avoid removing resources
-// not owned by this Application.
 func CleanupService(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
-	var svc corev1.Service
-	if err := c.Get(ctx, types.NamespacedName{Name: app.Name, Namespace: app.Namespace}, &svc); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-	for _, ref := range svc.OwnerReferences {
-		if ref.UID == app.UID {
-			if err := c.Delete(ctx, &svc); client.IgnoreNotFound(err) != nil {
-				return err
-			}
-			log.FromContext(ctx).Info("Service cleaned up", "name", svc.Name)
-			return nil
-		}
-	}
-	log.FromContext(ctx).Info("Service not owned by this Application, skipping cleanup", "name", svc.Name)
-	return nil
+	return CleanupOwnedResource(ctx, c, app, &corev1.Service{}, "Service")
 }
