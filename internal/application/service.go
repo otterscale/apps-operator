@@ -40,16 +40,36 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 		},
 	}
 
-	if app.Spec.Service == nil {
+	if app.Spec.DeploymentConfig == nil || app.Spec.DeploymentConfig.Service == nil {
 		return client.IgnoreNotFound(c.Delete(ctx, svc))
 	}
 
 	op, err := ctrlutil.CreateOrUpdate(ctx, c, svc, func() error {
 		// Preserve ClusterIP on update — Kubernetes treats it as immutable once assigned.
 		clusterIP := svc.Spec.ClusterIP
-		svc.Spec = *app.Spec.Service
+		nodePorts := make(map[int32]int32, len(svc.Spec.Ports))
+		for _, p := range svc.Spec.Ports {
+			if p.NodePort != 0 {
+				nodePorts[p.Port] = p.NodePort
+			}
+		}
+
+		// DeepCopy before assigning to avoid mutating the Application's in-memory
+		// ServiceSpec via shared slice/map backing arrays when restoring ClusterIP
+		// and NodePort values below.
+		svc.Spec = *app.Spec.DeploymentConfig.Service.DeepCopy()
+
 		if clusterIP != "" {
 			svc.Spec.ClusterIP = clusterIP
+		}
+		// Restore Kubernetes-assigned NodePort values so we don't trigger
+		// unnecessary port re-assignment on every reconcile.
+		for i := range svc.Spec.Ports {
+			if svc.Spec.Ports[i].NodePort == 0 {
+				if np, ok := nodePorts[svc.Spec.Ports[i].Port]; ok {
+					svc.Spec.Ports[i].NodePort = np
+				}
+			}
 		}
 
 		if svc.Labels == nil {
@@ -66,4 +86,10 @@ func ReconcileService(ctx context.Context, c client.Client, scheme *runtime.Sche
 		log.FromContext(ctx).Info("Service reconciled", "operation", op, "name", svc.Name)
 	}
 	return nil
+}
+
+// CleanupService deletes the Service owned by the Application if it exists.
+// This is called when transitioning from Deployment mode to CronJob mode.
+func CleanupService(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
+	return CleanupOwnedResource(ctx, c, app, &corev1.Service{}, "Service")
 }

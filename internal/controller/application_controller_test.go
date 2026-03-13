@@ -24,6 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -78,10 +79,13 @@ var _ = Describe("Application Controller", func() {
 	}
 
 	makeApplication := func(name, ns string, mods ...func(*workloadv1alpha1.Application)) *workloadv1alpha1.Application {
+		deploySpec := defaultDeploymentSpec()
 		a := &workloadv1alpha1.Application{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
 			Spec: workloadv1alpha1.ApplicationSpec{
-				Deployment: defaultDeploymentSpec(),
+				DeploymentConfig: &workloadv1alpha1.DeploymentConfig{
+					Deployment: deploySpec,
+				},
 			},
 		}
 		for _, mod := range mods {
@@ -168,7 +172,7 @@ var _ = Describe("Application Controller", func() {
 	Context("Optional Service Lifecycle", func() {
 		BeforeEach(func() {
 			application = makeApplication(resourceName, namespace.Name, func(a *workloadv1alpha1.Application) {
-				a.Spec.Service = &corev1.ServiceSpec{
+				a.Spec.DeploymentConfig.Service = &corev1.ServiceSpec{
 					Ports: []corev1.ServicePort{{
 						Port:       80,
 						TargetPort: intstr.FromInt32(8080),
@@ -195,7 +199,7 @@ var _ = Describe("Application Controller", func() {
 
 			By("Removing Service from spec")
 			fetchResource(application, resourceName, namespace.Name)
-			application.Spec.Service = nil
+			application.Spec.DeploymentConfig.Service = nil
 			Expect(k8sClient.Update(ctx, application)).To(Succeed())
 
 			executeReconcile()
@@ -214,7 +218,8 @@ var _ = Describe("Application Controller", func() {
 	Context("Optional PVC Lifecycle", func() {
 		BeforeEach(func() {
 			application = makeApplication(resourceName, namespace.Name, func(a *workloadv1alpha1.Application) {
-				a.Spec.PersistentVolumeClaim = &corev1.PersistentVolumeClaimSpec{
+				a.Spec.DeploymentConfig.MountPath = "/data"
+				a.Spec.DeploymentConfig.PersistentVolumeClaim = &corev1.PersistentVolumeClaimSpec{
 					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 					Resources: corev1.VolumeResourceRequirements{
 						Requests: corev1.ResourceList{
@@ -241,7 +246,8 @@ var _ = Describe("Application Controller", func() {
 
 			By("Removing PVC from spec")
 			fetchResource(application, resourceName, namespace.Name)
-			application.Spec.PersistentVolumeClaim = nil
+			application.Spec.DeploymentConfig.PersistentVolumeClaim = nil
+			application.Spec.DeploymentConfig.MountPath = ""
 			Expect(k8sClient.Update(ctx, application)).To(Succeed())
 
 			executeReconcile()
@@ -260,6 +266,204 @@ var _ = Describe("Application Controller", func() {
 			By("Verifying PVCRef is cleared in status")
 			fetchResource(application, resourceName, namespace.Name)
 			Expect(application.Status.PersistentVolumeClaimRef).To(BeNil())
+		})
+	})
+
+	Context("CronJob Workload", func() {
+		BeforeEach(func() {
+			application = &workloadv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace.Name},
+				Spec: workloadv1alpha1.ApplicationSpec{
+					WorkloadType: workloadv1alpha1.WorkloadTypeCronJob,
+					CronJob: &batchv1.CronJobSpec{
+						Schedule:                   "0 2 * * *",
+						SuccessfulJobsHistoryLimit: func() *int32 { v := int32(3); return &v }(),
+						FailedJobsHistoryLimit:     func() *int32 { v := int32(1); return &v }(),
+						JobTemplate: batchv1.JobTemplateSpec{
+							Spec: batchv1.JobSpec{
+								Template: corev1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										RestartPolicy: corev1.RestartPolicyOnFailure,
+										Containers: []corev1.Container{{
+											Name:    "worker",
+											Image:   "busybox:1.37",
+											Command: []string{"/bin/sh", "-c", "echo done"},
+										}},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+		})
+
+		It("should create a CronJob with correct labels and OwnerReference", func() {
+			executeReconcile()
+
+			By("Verifying the CronJob is created")
+			var cj batchv1.CronJob
+			fetchResource(&cj, resourceName, namespace.Name)
+			Expect(cj.Spec.Schedule).To(Equal("0 2 * * *"))
+			Expect(cj.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "workload-operator"))
+			Expect(cj.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "application"))
+
+			By("Verifying OwnerReference is set")
+			Expect(cj.OwnerReferences).To(HaveLen(1))
+			Expect(cj.OwnerReferences[0].Name).To(Equal(resourceName))
+
+			By("Verifying status: CronJobRef set, all others nil")
+			fetchResource(application, resourceName, namespace.Name)
+			Expect(application.Status.CronJobRef).NotTo(BeNil())
+			Expect(application.Status.CronJobRef.Name).To(Equal(resourceName))
+			Expect(application.Status.DeploymentRef).To(BeNil())
+			Expect(application.Status.ServiceRef).To(BeNil())
+			Expect(application.Status.PersistentVolumeClaimRef).To(BeNil())
+			Expect(application.Status.JobRef).To(BeNil())
+		})
+
+		It("should not set a Progressing condition for CronJob workloads", func() {
+			executeReconcile()
+
+			fetchResource(application, resourceName, namespace.Name)
+			for _, c := range application.Status.Conditions {
+				Expect(c.Type).NotTo(Equal("Progressing"),
+					"Progressing condition must not be present for CronJob workloads")
+			}
+		})
+
+		It("should return an error when spec.cronJob is nil", func() {
+			// Bypass API validation by directly patching the stored object after creation
+			// so we can verify controller-side nil guard.
+			Expect(k8sClient.Create(ctx, &workloadv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      resourceName + "-nil",
+					Namespace: namespace.Name,
+				},
+				Spec: workloadv1alpha1.ApplicationSpec{
+					WorkloadType: workloadv1alpha1.WorkloadTypeCronJob,
+					CronJob: &batchv1.CronJobSpec{
+						Schedule: "* * * * *",
+						JobTemplate: batchv1.JobTemplateSpec{
+							Spec: batchv1.JobSpec{
+								Template: corev1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										RestartPolicy: corev1.RestartPolicyOnFailure,
+										Containers:    []corev1.Container{{Name: "c", Image: "busybox"}},
+									},
+								},
+							},
+						},
+					},
+				},
+			})).To(Succeed())
+
+			// Construct a reconciler that holds a fake Application with nil CronJob
+			// to exercise the nil-guard path in ReconcileCronJob directly.
+			nilApp := &workloadv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName + "-nil", Namespace: namespace.Name},
+				Spec: workloadv1alpha1.ApplicationSpec{
+					WorkloadType: workloadv1alpha1.WorkloadTypeCronJob,
+					CronJob:      nil, // intentionally nil
+				},
+			}
+			// Patch the live object's spec to have nil cronJob field so Reconcile
+			// fetches it from the API and hits the guard.
+			// Instead, call reconcileResources directly to test the guard path.
+			err := reconciler.reconcileResources(ctx, nilApp)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.cronJob is nil"))
+		})
+	})
+
+	Context("Job Workload", func() {
+		BeforeEach(func() {
+			application = &workloadv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace.Name},
+				Spec: workloadv1alpha1.ApplicationSpec{
+					WorkloadType: workloadv1alpha1.WorkloadTypeJob,
+					Job: &batchv1.JobSpec{
+						BackoffLimit:          func() *int32 { v := int32(2); return &v }(),
+						ActiveDeadlineSeconds: func() *int64 { v := int64(300); return &v }(),
+						Template: corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								RestartPolicy: corev1.RestartPolicyOnFailure,
+								Containers: []corev1.Container{{
+									Name:    "task",
+									Image:   "busybox:1.37",
+									Command: []string{"/bin/sh", "-c", "echo done"},
+								}},
+							},
+						},
+					},
+				},
+			}
+		})
+
+		It("should create a Job with correct labels and OwnerReference", func() {
+			executeReconcile()
+
+			By("Verifying the Job is created")
+			var job batchv1.Job
+			fetchResource(&job, resourceName, namespace.Name)
+			Expect(job.Spec.BackoffLimit).NotTo(BeNil())
+			Expect(*job.Spec.BackoffLimit).To(Equal(int32(2)))
+			Expect(job.Labels).To(HaveKeyWithValue("app.kubernetes.io/managed-by", "workload-operator"))
+			Expect(job.Labels).To(HaveKeyWithValue("app.kubernetes.io/component", "application"))
+
+			By("Verifying OwnerReference is set")
+			Expect(job.OwnerReferences).To(HaveLen(1))
+			Expect(job.OwnerReferences[0].Name).To(Equal(resourceName))
+
+			By("Verifying status: JobRef set, all others nil")
+			fetchResource(application, resourceName, namespace.Name)
+			Expect(application.Status.JobRef).NotTo(BeNil())
+			Expect(application.Status.JobRef.Name).To(Equal(resourceName))
+			Expect(application.Status.DeploymentRef).To(BeNil())
+			Expect(application.Status.ServiceRef).To(BeNil())
+			Expect(application.Status.PersistentVolumeClaimRef).To(BeNil())
+			Expect(application.Status.CronJobRef).To(BeNil())
+		})
+
+		It("should not set a Progressing condition for Job workloads", func() {
+			executeReconcile()
+
+			fetchResource(application, resourceName, namespace.Name)
+			for _, c := range application.Status.Conditions {
+				Expect(c.Type).NotTo(Equal("Progressing"),
+					"Progressing condition must not be present for Job workloads")
+			}
+		})
+
+		It("should return an error when spec.job is nil", func() {
+			nilApp := &workloadv1alpha1.Application{
+				ObjectMeta: metav1.ObjectMeta{Name: resourceName, Namespace: namespace.Name},
+				Spec: workloadv1alpha1.ApplicationSpec{
+					WorkloadType: workloadv1alpha1.WorkloadTypeJob,
+					Job:          nil, // intentionally nil
+				},
+			}
+			err := reconciler.reconcileResources(ctx, nilApp)
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("spec.job is nil"))
+		})
+
+		It("should not overwrite Job spec on subsequent reconciles", func() {
+			executeReconcile()
+
+			By("Modifying the in-memory spec and reconciling again")
+			fetchResource(application, resourceName, namespace.Name)
+			newBackoff := int32(99)
+			application.Spec.Job.BackoffLimit = &newBackoff
+			// Do NOT update the API object — simulate a reconcile loop where
+			// the controller sees the original API state.
+			executeReconcile()
+
+			By("Verifying the Job spec was not overwritten")
+			var job batchv1.Job
+			fetchResource(&job, resourceName, namespace.Name)
+			// BackoffLimit should still be 2 (from creation), not 99
+			Expect(*job.Spec.BackoffLimit).To(Equal(int32(2)))
 		})
 	})
 

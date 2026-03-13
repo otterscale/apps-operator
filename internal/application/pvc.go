@@ -45,17 +45,17 @@ func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, 
 		},
 	}
 
-	if app.Spec.PersistentVolumeClaim == nil {
+	if app.Spec.DeploymentConfig == nil || app.Spec.DeploymentConfig.PersistentVolumeClaim == nil {
 		return client.IgnoreNotFound(c.Delete(ctx, pvc))
 	}
 
 	op, err := ctrlutil.CreateOrUpdate(ctx, c, pvc, func() error {
 		if pvc.CreationTimestamp.IsZero() {
-			pvc.Spec = *app.Spec.PersistentVolumeClaim
+			pvc.Spec = *app.Spec.DeploymentConfig.PersistentVolumeClaim
 		} else {
 			// Volume expansion: update storage request if the desired size is larger.
 			// Kubernetes only allows increasing the size; the API server enforces this.
-			if desired, ok := app.Spec.PersistentVolumeClaim.Resources.Requests[corev1.ResourceStorage]; ok {
+			if desired, ok := app.Spec.DeploymentConfig.PersistentVolumeClaim.Resources.Requests[corev1.ResourceStorage]; ok {
 				if pvc.Spec.Resources.Requests == nil {
 					pvc.Spec.Resources.Requests = corev1.ResourceList{}
 				}
@@ -77,4 +77,10 @@ func ReconcilePVC(ctx context.Context, c client.Client, scheme *runtime.Scheme, 
 		log.FromContext(ctx).Info("PersistentVolumeClaim reconciled", "operation", op, "name", pvc.Name)
 	}
 	return nil
+}
+
+// CleanupPVC deletes the PersistentVolumeClaim owned by the Application if it exists.
+// This is called when transitioning from Deployment mode to CronJob mode.
+func CleanupPVC(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
+	return CleanupOwnedResource(ctx, c, app, &corev1.PersistentVolumeClaim{}, "PersistentVolumeClaim")
 }

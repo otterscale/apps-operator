@@ -18,9 +18,11 @@ package application
 
 import (
 	"context"
+	"fmt"
 	"maps"
 
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,7 +43,18 @@ func ReconcileDeployment(ctx context.Context, c client.Client, scheme *runtime.S
 	}
 
 	op, err := ctrlutil.CreateOrPatch(ctx, c, deploy, func() error {
-		deploy.Spec = app.Spec.Deployment
+		// Should not happen due to CEL validation, but guard against panic from
+		if app.Spec.DeploymentConfig == nil {
+			return fmt.Errorf("application %s/%s has workloadType Deployment but spec.deploymentConfig is nil",
+				app.Namespace, app.Name)
+		}
+		deploy.Spec = app.Spec.DeploymentConfig.Deployment
+
+		// If a PVC is requested, inject the corresponding Volume and VolumeMounts
+		// into the pod spec so containers can access the persistent storage.
+		if app.Spec.DeploymentConfig.PersistentVolumeClaim != nil {
+			injectPVC(&deploy.Spec, app.Name, app.Spec.DeploymentConfig.MountPath)
+		}
 
 		if deploy.Labels == nil {
 			deploy.Labels = map[string]string{}
@@ -57,4 +70,61 @@ func ReconcileDeployment(ctx context.Context, c client.Client, scheme *runtime.S
 		log.FromContext(ctx).Info("Deployment reconciled", "operation", op, "name", deploy.Name)
 	}
 	return nil
+}
+
+// injectPVC ensures the PVC-backed Volume and per-container VolumeMounts are
+// present in the Deployment pod spec. It is idempotent: if an entry with the
+// given name already exists it is updated in place rather than duplicated.
+// The volume name equals the PVC name (which equals app.Name).
+func injectPVC(spec *appsv1.DeploymentSpec, pvcName, mountPath string) {
+	// Ensure the Volume entry exists and points to the correct PVC.
+	volumeFound := false
+	for i, v := range spec.Template.Spec.Volumes {
+		if v.Name == pvcName {
+			spec.Template.Spec.Volumes[i].VolumeSource = corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				},
+			}
+			volumeFound = true
+			break
+		}
+	}
+	if !volumeFound {
+		spec.Template.Spec.Volumes = append(spec.Template.Spec.Volumes, corev1.Volume{
+			Name: pvcName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+				},
+			},
+		})
+	}
+
+	// Ensure every container has a VolumeMount for this volume.
+	for i := range spec.Template.Spec.Containers {
+		mountFound := false
+		for j, vm := range spec.Template.Spec.Containers[i].VolumeMounts {
+			if vm.Name == pvcName {
+				spec.Template.Spec.Containers[i].VolumeMounts[j].MountPath = mountPath
+				mountFound = true
+				break
+			}
+		}
+		if !mountFound {
+			spec.Template.Spec.Containers[i].VolumeMounts = append(
+				spec.Template.Spec.Containers[i].VolumeMounts,
+				corev1.VolumeMount{
+					Name:      pvcName,
+					MountPath: mountPath,
+				},
+			)
+		}
+	}
+}
+
+// CleanupDeployment deletes the Deployment owned by the Application if it exists.
+// This is called when transitioning from Deployment mode to CronJob mode.
+func CleanupDeployment(ctx context.Context, c client.Client, app *workloadv1alpha1.Application) error {
+	return CleanupOwnedResource(ctx, c, app, &appsv1.Deployment{}, "Deployment")
 }
